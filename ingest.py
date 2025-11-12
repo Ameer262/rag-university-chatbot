@@ -23,7 +23,7 @@ def main():
 
     # 2. חיתוך הנתונים (Split/Chunk)
     print("חותך נתונים...")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=350, chunk_overlap=75)
     splits = text_splitter.split_documents(documents)
 
     # 3. יצירת Embeddings ואחסון (Store)
