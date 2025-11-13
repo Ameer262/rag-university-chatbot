@@ -41,7 +41,10 @@ def get_components():
     )
     
     # 4. הגדרת ה-Retriever (עם שדה ראייה רחב)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
+    retriever = vectorstore.as_retriever(
+    search_type="mmr", 
+    search_kwargs={"k": 8, "fetch_k": 20}
+    )
     
     return llm, retriever
 
