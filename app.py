@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 # הגדרות
 VECTOR_STORE_PATH = "./vector_store"
-os.environ["NVIDIA_API_KEY"] = "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" # ודאו שהמפתח כאן
+os.environ["NVIDIA_API_KEY"] = "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" # <--- ודאו שהמפתח שלכם כאן!
 
 @st.cache_resource
 def get_components():
@@ -31,31 +31,48 @@ def get_components():
     )
     return llm, vectorstore
 
-# פונקציה שיוצרת את השרשרת *מחדש* בכל פעם שמשנים את הפילטר
-def create_chain_with_filter(llm, vectorstore, department_filter):
+# --- הפונקציה המתוקנת לסינון ---
+def create_chain_with_filter(llm, vectorstore, department_filter, category_filter):
     
-    # 1. הגדרת הפילטר (החלק החדש והחכם!)
-    # אם נבחר "הכל", לא מסננים. אחרת, מסננים לפי השדה 'department'
-    if department_filter == "הכל":
-        filter_dict = None
-    else:
-        # המרה מהשם בעברית לקוד באנגלית (כמו ששמרנו ב-ingest)
+    conditions = []
+
+    # 1. תנאי חוג
+    if department_filter != "הכל":
         dept_map = {"מדעי המחשב": "cs", "מערכות מידע": "is"}
         selected_dept = dept_map.get(department_filter)
-        filter_dict = {"department": selected_dept}
+        if selected_dept:
+            conditions.append({"department": selected_dept})
 
-    # 2. יצירת ה-Retriever עם הפילטר
-    # שימו לב לפרמטר 'filter' החדש!
+    # 2. תנאי סוג מידע
+    if category_filter != "הכל":
+        cat_map = {"סילבוס קורס": "syllabus", "מידע כללי ונהלים": "general"}
+        selected_cat = cat_map.get(category_filter)
+        if selected_cat:
+            conditions.append({"category": selected_cat})
+
+    # --- בניית הפילטר הסופי (התיקון הקריטי) ---
+    if len(conditions) == 0:
+        final_filter = None
+    elif len(conditions) == 1:
+        # אם יש רק תנאי אחד, מעבירים אותו ישירות
+        final_filter = conditions[0]
+    else:
+        # אם יש יותר מתנאי אחד, חייבים להשתמש ב-$and
+        final_filter = {"$and": conditions}
+
+    print(f"DEBUG: Active Filter: {final_filter}") 
+
+    # יצירת ה-Retriever
     retriever = vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={
             "k": 8, 
             "fetch_k": 20,
-            "filter": filter_dict  # <--- כאן קורה הקסם
+            "filter": final_filter 
         }
     )
 
-    # 3. בניית השרשרת (כמו קודם)
+    # --- בניית השרשרת (היסטוריה + תשובה) ---
     contextualize_q_system_prompt = (
         "Given a chat history and the latest user question "
         "which might reference context in the chat history, "
@@ -81,32 +98,38 @@ def create_chain_with_filter(llm, vectorstore, department_filter):
 def main():
     st.set_page_config(page_title="צ'אטבוט הפקולטה", layout="wide")
     
-    # --- סרגל צד (Sidebar) ---
+    # --- סרגל צד ---
     with st.sidebar:
-        st.header("הגדרות")
-        # תיבת בחירה לחוג
+        st.header("סינון וחיפוש")
+        
         selected_dept = st.selectbox(
-            "בחר חוג:",
+            "1. בחר חוג:",
             ["הכל", "מדעי המחשב", "מערכות מידע"]
         )
+
+        selected_category = st.selectbox(
+            "2. איזה מידע מעניין אותך?",
+            ["הכל", "סילבוס קורס", "מידע כללי ונהלים"]
+        )
+
+        st.info(f"מצב נוכחי: {selected_dept} -> {selected_category}")
+        
         st.write("---")
         if st.button("נקה היסטוריית צ'אט"):
             st.session_state.chat_history = []
             st.rerun()
 
-    st.title(f"🤖 צ'אטבוט - {selected_dept}")
+    st.title(f"🤖 צ'אטבוט הפקולטה")
 
-    # טעינת רכיבים בסיסיים
     try:
         llm, vectorstore = get_components()
     except Exception as e:
         st.error(f"שגיאה: {e}")
         st.stop()
 
-    # יצירת השרשרת הספציפית לפי הפילטר שנבחר
-    rag_chain = create_chain_with_filter(llm, vectorstore, selected_dept)
+    # יצירת השרשרת עם הפילטר החדש
+    rag_chain = create_chain_with_filter(llm, vectorstore, selected_dept, selected_category)
 
-    # ניהול היסטוריה והצגה (כמו קודם)
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -119,15 +142,34 @@ def main():
     if prompt := st.chat_input("שאל אותי משהו..."):
         with st.chat_message("user"): st.markdown(prompt)
         with st.chat_message("assistant"):
-            with st.spinner("חושב..."):
+            with st.spinner("מחפש..."):
                 try:
                     response = rag_chain.invoke({
                         "input": prompt, 
                         "chat_history": st.session_state.chat_history
                     })
                     answer = response["answer"]
+                    sources = response["context"]
+
                     st.markdown(answer)
+
+                    # הצגת מקורות
+                    with st.expander("📚 הצג מקורות מידע"):
+                        seen_sources = set()
+                        for doc in sources:
+                            source_name = os.path.basename(doc.metadata.get("source", "לא ידוע"))
+                            dept = doc.metadata.get("department", "?")
+                            cat = doc.metadata.get("category", "?")
+                            
+                            # מזהה ייחודי למקור (כדי לא להציג כפילויות)
+                            source_id = f"{source_name} ({dept}/{cat})"
+                            
+                            if source_id not in seen_sources:
+                                st.markdown(f"- 📄 **{source_id}**")
+                                seen_sources.add(source_id)
+
                     st.session_state.chat_history.extend([HumanMessage(content=prompt), AIMessage(content=answer)])
+                
                 except Exception as e:
                     st.error(f"אירעה שגיאה: {e}")
 
