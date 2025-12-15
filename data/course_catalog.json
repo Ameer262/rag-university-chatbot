@@ -1,0 +1,9 @@
+[
+  {
+    "department": "cs",
+    "course_code": "203.3834",
+    "course_name": "Deep Learning",
+    "aliases": ["למידה עמוקה", "Deep Learning", "DL", "דיפ לרנינג"],
+    "source_files": ["dlsyllabus.pdf"]
+  }
+]

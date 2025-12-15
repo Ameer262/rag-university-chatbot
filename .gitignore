@@ -5,6 +5,10 @@ venv/
 # Vector Database (DO NOT upload the DB)
 vector_store/
 
+.vs/
+.env
+
+
 # Python cache
 __pycache__/
 *.pyc

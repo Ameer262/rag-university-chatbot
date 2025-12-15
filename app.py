@@ -1,177 +1,125 @@
-import os
 import streamlit as st
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
-from langchain.chains.history_aware_retriever import create_history_aware_retriever
-from langchain_core.messages import HumanMessage, AIMessage
+import os
+from dotenv import load_dotenv  # <--- הרכיב החדש
 
-# הגדרות
-VECTOR_STORE_PATH = "./vector_store"
-os.environ["NVIDIA_API_KEY"] = "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" # <--- ודאו שהמפתח שלכם כאן!
+# טעינת המפתח מקובץ ה-.env הנסתר
+load_dotenv()
 
-@st.cache_resource
-def get_components():
-    print("טוען רכיבים...")
-    llm = ChatNVIDIA(model="meta/llama3-8b-instruct")
-    embeddings = HuggingFaceEmbeddings(
-        model_name="paraphrase-multilingual-MiniLM-L12-v2",
-        model_kwargs={'device': 'cpu'}
-    )
-    if not os.path.exists(VECTOR_STORE_PATH):
-        st.error(f"שגיאה: תיקיית מסד הנתונים '{VECTOR_STORE_PATH}' לא נמצאה.")
-        st.stop()
-        
-    vectorstore = Chroma(
-        persist_directory=VECTOR_STORE_PATH, 
-        embedding_function=embeddings
-    )
-    return llm, vectorstore
+# ייבוא המוח שבנינו בתיקיית src
+from src import router, rag_engine
 
-# --- הפונקציה המתוקנת לסינון ---
-def create_chain_with_filter(llm, vectorstore, department_filter, category_filter):
+# --- הגדרות עמוד ---
+st.set_page_config(page_title="Academic Chatbot Pro", layout="wide", page_icon="🎓")
+
+# --- ניהול זיכרון (Session State) ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# זיכרון של "הקורס האחרון" כדי לשמור הקשר בין שאלות עוקבות
+if "last_course_hint" not in st.session_state:
+    st.session_state.last_course_hint = None
+
+def reset_history():
+    """פונקציה לניקוי ההיסטוריה בעת החלפת חוג"""
+    st.session_state.chat_history = []
+    st.session_state.last_course_hint = None
+
+# --- סרגל צד (Sidebar) ---
+with st.sidebar:
+    st.title("⚙️ הגדרות מערכת")
     
-    conditions = []
-
-    # 1. תנאי חוג
-    if department_filter != "הכל":
-        dept_map = {"מדעי המחשב": "cs", "מערכות מידע": "is"}
-        selected_dept = dept_map.get(department_filter)
-        if selected_dept:
-            conditions.append({"department": selected_dept})
-
-    # 2. תנאי סוג מידע
-    if category_filter != "הכל":
-        cat_map = {"סילבוס קורס": "syllabus", "מידע כללי ונהלים": "general"}
-        selected_cat = cat_map.get(category_filter)
-        if selected_cat:
-            conditions.append({"category": selected_cat})
-
-    # --- בניית הפילטר הסופי (התיקון הקריטי) ---
-    if len(conditions) == 0:
-        final_filter = None
-    elif len(conditions) == 1:
-        # אם יש רק תנאי אחד, מעבירים אותו ישירות
-        final_filter = conditions[0]
+    # בדיקה אוטומטית אם המפתח קיים
+    if not os.getenv("NVIDIA_API_KEY"):
+        st.error("❌ מפתח API חסר! נא ליצור קובץ .env")
+        st.stop()
     else:
-        # אם יש יותר מתנאי אחד, חייבים להשתמש ב-$and
-        final_filter = {"$and": conditions}
-
-    print(f"DEBUG: Active Filter: {final_filter}") 
-
-    # יצירת ה-Retriever
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={
-            "k": 8, 
-            "fetch_k": 20,
-            "filter": final_filter 
-        }
-    )
-
-    # --- בניית השרשרת (היסטוריה + תשובה) ---
-    contextualize_q_system_prompt = (
-        "Given a chat history and the latest user question "
-        "which might reference context in the chat history, "
-        "formulate a standalone question which can be understood "
-        "without the chat history. Do NOT answer the question, "
-        "just reformulate it if needed and otherwise return it as is."
-    )
-    contextualize_q_prompt = ChatPromptTemplate.from_messages(
-        [("system", contextualize_q_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
-    )
-    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+        st.success("✅ מחובר למערכת ה-AI")
     
-    qa_system_prompt = (
-        "אתה עוזר אוניברסיטאי. ענה על שאלת המשתמש אך ורק "
-        "בהתבסס על ההקשר (Context) הבא:\n\n<context>\n{context}\n</context>"
-    )
-    qa_prompt = ChatPromptTemplate.from_messages(
-        [("system", qa_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
-    )
-    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-    return create_retrieval_chain(history_aware_retriever, question_answer_chain)
-
-def main():
-    st.set_page_config(page_title="צ'אטבוט הפקולטה", layout="wide")
+    st.divider()
     
-    # --- סרגל צד ---
-    with st.sidebar:
-        st.header("סינון וחיפוש")
+    st.header("1. בחר תחום לימוד")
+    # מיפוי בין השם בעברית לקוד התיקייה
+    dept_mapping = {
+        "מדעי המחשב": "cs",
+        "מערכות מידע": "is"
+    }
+    
+    selected_dept_name = st.selectbox(
+        "חוג:",
+        list(dept_mapping.keys()),
+        on_change=reset_history
+    )
+    
+    # שמירת הקוד (cs/is) לשימוש המנוע
+    current_dept_code = dept_mapping[selected_dept_name]
+    
+    st.info("💡 **טיפ:** המערכת מזהה לבד אם שאלתם על סילבוס או נהלים כלליים.")
+    
+    if st.button("🗑️ נקה שיחה ידנית"):
+        reset_history()
+        st.rerun()
+
+# --- חלון הצ'אט הראשי ---
+st.title("🤖 העוזר האקדמי החכם (v2.0)")
+
+# 1. הצגת היסטוריית השיחה
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# 2. קליטת שאלה מהמשתמש
+if prompt := st.chat_input("שאל אותי משהו על הקורסים או הנהלים..."):
+    
+    # קבלת המפתח מהסביבה (לא מהמשתמש!)
+    api_key = os.getenv("NVIDIA_API_KEY")
+
+    # הצגת שאלת המשתמש מיידית
+    st.chat_message("user").markdown(prompt)
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+
+    # --- עדכון זיכרון "קורס אחרון" (כרגע בסיסי) ---
+    p_lower = prompt.lower()
+    if "למידה עמוקה" in prompt or "deep learning" in p_lower:
+        st.session_state.last_course_hint = "למידה עמוקה"
+
+    # --- הוספת הקשר לשאלות קצרות (אם אין אישור לקורס בשאלה עצמה) ---
+    short_q = len(prompt.strip()) <= 25
+    has_course_word = ("למידה" in prompt) or ("deep" in p_lower)
+
+    final_prompt = prompt
+    if short_q and (not has_course_word) and st.session_state.last_course_hint:
+        final_prompt = f"{prompt} (בהקשר של הקורס {st.session_state.last_course_hint})"
+
+    # 3. תהליך המחשבה של הבוט
+    with st.chat_message("assistant"):
         
-        selected_dept = st.selectbox(
-            "1. בחר חוג:",
-            ["הכל", "מדעי המחשב", "מערכות מידע"]
-        )
+        # שלב א': הראוטר (המוח הממיין)
+        with st.status("🧠 מנתח את כוונת השאלה...", expanded=True) as status:
+            
+            # קריאה ל-Router (על השאלה אחרי הקשר)
+            intent = router.classify_intent(final_prompt, api_key)
+            
+            st.write(f"סיווג זוהה: **{intent}**")
+            st.write("מבצע אופטימיזציה לשאלה ושולף מסמכים...")
+            
+            status.update(label=f"✅ סווג כ: {intent}", state="complete", expanded=False)
 
-        selected_category = st.selectbox(
-            "2. איזה מידע מעניין אותך?",
-            ["הכל", "סילבוס קורס", "מידע כללי ונהלים"]
+        # שלב ב': המנוע (RAG Engine)
+        response_text, sources = rag_engine.ask_question(
+            original_query=final_prompt,
+            department=current_dept_code,
+            category=intent,
+            api_key=api_key
         )
-
-        st.info(f"מצב נוכחי: {selected_dept} -> {selected_category}")
         
-        st.write("---")
-        if st.button("נקה היסטוריית צ'אט"):
-            st.session_state.chat_history = []
-            st.rerun()
+        # הצגת התשובה
+        st.markdown(response_text)
+        
+        # הצגת מקורות
+        if sources:
+            with st.expander("📚 מקורות מידע ששימשו לתשובה"):
+                for source in sources:
+                    st.markdown(f"- 📄 `{source}`")
 
-    st.title(f"🤖 צ'אטבוט הפקולטה")
-
-    try:
-        llm, vectorstore = get_components()
-    except Exception as e:
-        st.error(f"שגיאה: {e}")
-        st.stop()
-
-    # יצירת השרשרת עם הפילטר החדש
-    rag_chain = create_chain_with_filter(llm, vectorstore, selected_dept, selected_category)
-
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    for msg in st.session_state.chat_history:
-        if isinstance(msg, HumanMessage):
-            with st.chat_message("user"): st.markdown(msg.content)
-        elif isinstance(msg, AIMessage):
-            with st.chat_message("assistant"): st.markdown(msg.content)
-
-    if prompt := st.chat_input("שאל אותי משהו..."):
-        with st.chat_message("user"): st.markdown(prompt)
-        with st.chat_message("assistant"):
-            with st.spinner("מחפש..."):
-                try:
-                    response = rag_chain.invoke({
-                        "input": prompt, 
-                        "chat_history": st.session_state.chat_history
-                    })
-                    answer = response["answer"]
-                    sources = response["context"]
-
-                    st.markdown(answer)
-
-                    # הצגת מקורות
-                    with st.expander("📚 הצג מקורות מידע"):
-                        seen_sources = set()
-                        for doc in sources:
-                            source_name = os.path.basename(doc.metadata.get("source", "לא ידוע"))
-                            dept = doc.metadata.get("department", "?")
-                            cat = doc.metadata.get("category", "?")
-                            
-                            # מזהה ייחודי למקור (כדי לא להציג כפילויות)
-                            source_id = f"{source_name} ({dept}/{cat})"
-                            
-                            if source_id not in seen_sources:
-                                st.markdown(f"- 📄 **{source_id}**")
-                                seen_sources.add(source_id)
-
-                    st.session_state.chat_history.extend([HumanMessage(content=prompt), AIMessage(content=answer)])
-                
-                except Exception as e:
-                    st.error(f"אירעה שגיאה: {e}")
-
-if __name__ == "__main__":
-    main()
+        # שמירה בהיסטוריה
+        st.session_state.chat_history.append({"role": "assistant", "content": response_text})
